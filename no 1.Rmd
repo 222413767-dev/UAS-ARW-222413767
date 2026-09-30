@@ -1,0 +1,122 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+ ---
+output:
+  word_document: default
+  html_document: default
+---
+```{r}
+library(readxl)
+library(tseries)
+library(urca)
+library(forecast)
+library(lmtest)
+library(FinTS)
+library(rugarch)
+library(xts)
+set.seed(123)
+
+# 1. PERSIAPAN DATA & PLOT
+AIMS <- read_excel("D:/STIS/ARW/UAS/DATA UAS_222413767.xlsx", sheet = "no1")
+aims = data.frame(Tanggal = as.Date(AIMS$Date, format = "%m/%d/%Y"),
+                  Harga   = AIMS$Price)
+aims <- aims[order(aims$Tanggal), ]
+
+# Menghitung log return (%)
+harga = aims$Harga
+ret = diff(log(harga)) * 100
+tgl = aims$Tanggal[-1]
+ret_xts = xts(ret, order.by = tgl)
+
+# VISUAL 1: Harga penutupan, return, ACF dan PACF return
+par(mfrow = c(2, 2))
+plot(aims$Tanggal, harga, type = "l", main = "Harga Penutupan AIMS", xlab = "", ylab = "Rupiah")
+plot(tgl, ret, type = "l", main = "Log Return AIMS", xlab = "", ylab = "Return (%)")
+abline(h = 0, col = "red", lty = 2)
+acf(ret,  main = "ACF Return")
+pacf(ret, main = "PACF Return")
+par(mfrow = c(1, 1))
+
+# Statistik deskriptif & normalitas
+summary(ret)
+jarque.bera.test(ret)
+
+# 2. UJI STASIONERITAS & MODEL ARIMA
+adf_ret = ur.df(ret, type = "none", lags = 2)
+summary(adf_ret)
+
+best_model = auto.arima(ret, stepwise = FALSE, approximation = FALSE, trace = TRUE)
+coeftest(best_model)
+
+# Ekstrak orde untuk mean.model GARCH
+p_order = arimaorder(best_model)[1]
+q_order = arimaorder(best_model)[3]
+mean_ada = "intercept" %in% names(coef(best_model))
+res_ret = resid(best_model)
+
+# Uji autokorelasi residual model mean
+Box.test(res_ret, lag = 10, type = "Ljung-Box", fitdf = p_order + q_order)
+Box.test(res_ret, lag = 20, type = "Ljung-Box", fitdf = p_order + q_order)
+
+# VISUAL 2: ACF residual dan residual kuadrat
+par(mfrow = c(1, 2))
+acf(res_ret,   main = "ACF Residual ARMA")
+acf(res_ret^2, main = "ACF Residual Kuadrat ARMA")
+par(mfrow = c(1, 1))
+
+# 3. UJI EFEK ARCH
+ArchTest(res_ret, lags = 5)
+ArchTest(res_ret, lags = 10)
+
+# 4. PEMODELAN ARCH/GARCH (distribusi Student-t karena return tidak normal)
+fit_model = function(model, order) {
+  spec = ugarchspec(variance.model = list(model = model, garchOrder = order),
+                    mean.model = list(armaOrder = c(p_order, q_order), include.mean = mean_ada),
+                    distribution.model = "std")
+  ugarchfit(spec, data = ret_xts, solver = "hybrid")
+}
+fit.arch1   = fit_model("sGARCH",   c(1, 0))
+fit.garch11 = fit_model("sGARCH",   c(1, 1))
+fit.egarch11 = fit_model("eGARCH",  c(1, 1))
+fit.tgarch11 = fit_model("gjrGARCH", c(1, 1))
+
+# Perbandingan AIC
+cat("ARCH(1)     : AIC =", infocriteria(fit.arch1)[1, 1], "\n")
+cat("GARCH(1,1)  : AIC =", infocriteria(fit.garch11)[1, 1], "\n")
+cat("EGARCH(1,1) : AIC =", infocriteria(fit.egarch11)[1, 1], "\n")
+cat("TGARCH(1,1) : AIC =", infocriteria(fit.tgarch11)[1, 1], "\n")
+
+# 5. MODEL TERBAIK (AIC terkecil): GARCH(1,1)
+fit.garch11
+cat("Persistence (alpha1 + beta1):", persistence(fit.garch11), "\n")
+
+# Diagnostik residual terstandar
+z = as.numeric(residuals(fit.garch11, standardize = TRUE))
+Box.test(z,   lag = 10, type = "Ljung-Box", fitdf = p_order + q_order)
+Box.test(z,   lag = 20, type = "Ljung-Box", fitdf = p_order + q_order)
+Box.test(z^2, lag = 10, type = "Ljung-Box")
+Box.test(z^2, lag = 20, type = "Ljung-Box")
+ArchTest(z, lags = 5)
+ArchTest(z, lags = 10)
+
+# VISUAL 3: Conditional volatility
+plot(tgl, sigma(fit.garch11), type = "l", col = "blue",
+     main = "Conditional Volatility GARCH(1,1) Saham AIMS",
+     ylab = "Volatilitas (Standar Deviasi)", xlab = "Waktu")
+
+# VISUAL 4: ACF residual terstandar dan kuadratnya
+par(mfrow = c(1, 2))
+acf(z,   main = "ACF Standardized Residual")
+acf(z^2, main = "ACF Squared Std. Residual")
+par(mfrow = c(1, 1))
+
+# 6. PERAMALAN VOLATILITAS 10 HARI KE DEPAN
+fcy_garch = ugarchforecast(fit.garch11, n.ahead = 10)
+fcy_garch
+f_var = sigma(fcy_garch)^2
+f_var
+plot(fcy_garch, which = 3)
+```

@@ -1,0 +1,45 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+```{r}
+# 1. LOAD LIBRARY
+library(readxl)
+library(urca)
+library(lmtest)
+
+# 2. PERSIAPAN DATA
+data <- read_excel("D:/STIS/ARW/UAS/DATA UAS_222413767.xlsx", sheet = "no3")
+C <- ts(data$konsumsi, start = c(2010, 1), frequency = 4)   # Konsumsi RT
+Y <- ts(data$pdb,      start = c(2010, 1), frequency = 4)   # PDB
+plot(cbind(Konsumsi = C, PDB = Y), main = "Konsumsi RT dan PDB Indonesia")
+
+# 3. UJI STASIONERITAS (H0: tidak stasioner)
+# asli
+summary(ur.df(C, type = "trend", lags = 4, selectlags = "AIC"))
+summary(ur.df(Y, type = "trend", lags = 4, selectlags = "AIC"))
+# diff
+summary(ur.df(diff(C), type = "drift", lags = 4, selectlags = "AIC"))
+summary(ur.df(diff(Y), type = "drift", lags = 4, selectlags = "AIC"))
+
+# 4. PERSAMAAN JANGKA PANJANG
+model_jp <- lm(C ~ Y)
+summary(model_jp)
+
+# 5. UJI KOINTEGRASI ENGLE-GRANGER
+ect <- ts(residuals(model_jp), start = c(2010, 1), frequency = 4)
+summary(ur.df(ect, type = "none", lags = 1))
+
+# 6. ERROR CORRECTION MODEL (lag 1 dan lag 4 untuk pola triwulanan)
+dC <- diff(C); dY <- diff(Y)
+dat <- data.frame(ts.intersect(dC = dC, dY = dY, ECT_1 = lag(ect, -1),
+                               dC_1 = lag(dC, -1), dC_4 = lag(dC, -4),
+                               dY_1 = lag(dY, -1), dY_4 = lag(dY, -4)))
+model_ecm <- lm(dC ~ ., data = dat)
+summary(model_ecm)
+
+# 7. UJI DIAGNOSTIK
+bgtest(model_ecm, order = 4)   # H0: tidak ada autokorelasi
+bptest(model_ecm)              # H0: homoskedastis
+```

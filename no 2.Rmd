@@ -1,0 +1,154 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+```{r}
+library(readxl)
+library(tseries)
+library(urca)
+library(vars)
+
+# 1. IMPORT DATA
+data <- read_excel("D:/STIS/ARW/UAS/DATA UAS_222413767.xlsx", sheet = "no2")
+inflasi <- as.numeric(data$inflasi)
+rate    <- as.numeric(data$bunga)
+kurs    <- as.numeric(data$kurs)
+
+cat("Observasi :", nrow(data), "\n")
+cat("Periode   :", format(min(data$periode), "%Y-%m"), "s.d.", format(max(data$periode), "%Y-%m"), "\n")
+
+# 2. UJI STASIONERITAS
+uji <- function(x, nama){
+  adf0 <- ur.df(x, type="trend", lags=12, selectlags="AIC")
+  adf1 <- ur.df(diff(x), type="drift", lags=12, selectlags="AIC")
+  
+  data.frame(
+    Variabel = c(paste(nama,"Level"), paste(nama,"First Difference")),
+    ADF_Stat = c(adf0@teststat[1], adf1@teststat[1]),
+    ADF_CV5  = c(adf0@cval[1,"5pct"], adf1@cval[1,"5pct"]),
+    PP_p     = suppressWarnings(c(
+      pp.test(x)$p.value,
+      pp.test(diff(x))$p.value
+    )),
+    KPSS_p   = suppressWarnings(c(
+      kpss.test(x, null="Trend")$p.value,
+      kpss.test(diff(x), null="Level")$p.value
+    ))
+  )
+}
+
+stasioneritas <- rbind(
+  uji(inflasi, "Inflasi"),
+  uji(rate, "Suku Bunga"),
+  uji(kurs, "Kurs")
+)
+
+# UJI STASIONERITAS
+stasioneritas[, -1] <- round(stasioneritas[, -1], 4)
+print(stasioneritas, row.names=FALSE)
+
+# 3. UJI KOINTEGRASI
+Z <- cbind(Suku_Bunga=rate, Kurs=kurs)
+
+lag_koint <- VARselect(Z, lag.max=12, type="const")
+K <- max(2, as.integer(lag_koint$selection["AIC(n)"]))
+
+# LAG KOINTEGRASI
+print(lag_koint$selection)
+cat("Lag terpilih :", K, "\n")
+jo <- ca.jo(
+  Z,
+  type="trace",
+  ecdet="const",
+  K=K,
+  spec="transitory"
+)
+
+# UJI KOINTEGRASI JOHANSEN
+print(summary(jo))
+
+# 4. DATA STASIONER UNTUK VAR
+Y <- na.omit(data.frame(
+  Inflasi      = inflasi,
+  dSuku_Bunga  = c(NA, diff(rate)),
+  dKurs        = c(NA, diff(kurs))
+))
+
+# 5. LAG OPTIMAL VAR
+lag_var <- VARselect(Y, lag.max=12, type="const")
+p <- as.integer(lag_var$selection["AIC(n)"])
+
+# LAG OPTIMAL VAR
+print(lag_var$selection)
+cat("Lag VAR:", p, "\n")
+
+# 6. ESTIMASI VAR
+var_model <- VAR(Y, p=p, type="const")
+print(summary(var_model))
+
+# 7. STABILITAS
+akar <- roots(var_model, modulus=TRUE)
+
+# STABILITAS VAR
+print(round(akar, 4))
+cat("Root maksimum :", round(max(akar), 4), "\n")
+
+# 8. DIAGNOSTIK
+# A. Uji Autokorelasi (Portmanteau Test) - H0: Tidak ada autokorelasi
+print(serial.test(var_model, lags.pt=12, type="PT.asymptotic"))
+# B. Uji Normalitas (Jarque-Bera) - H0: Residual berdistribusi normal
+print(normality.test(var_model, multivariate.only=TRUE))
+# C. Uji Heteroskedastisitas (ARCH-LM) - H0: Varians residual konstan
+print(arch.test(var_model, lags.multi=5, multivariate.only=TRUE))
+
+# 9. GRANGER CAUSALITY
+# GRANGER INFLASI
+print(causality(var_model, cause="Inflasi")$Granger)
+# GRANGER SUKU BUNGA
+print(causality(var_model, cause="dSuku_Bunga")$Granger)
+# GRANGER KURS
+print(causality(var_model, cause="dKurs")$Granger)
+
+# 10. IMPULSE RESPONSE FUNCTION
+set.seed(123)
+
+IRF_inflasi <- irf(
+  var_model, impulse="Inflasi",
+  response=colnames(Y),
+  n.ahead=12, boot=TRUE, runs=500, ci=0.95
+)
+IRF_rate <- irf(
+  var_model, impulse="dSuku_Bunga",
+  response=colnames(Y),
+  n.ahead=12, boot=TRUE, runs=500, ci=0.95
+)
+IRF_kurs <- irf(
+  var_model, impulse="dKurs",
+  response=colnames(Y),
+  n.ahead=12, boot=TRUE, runs=500, ci=0.95
+)
+# IRF SHOCK INFLASI
+print(round(IRF_inflasi$irf$Inflasi, 4))
+# IRF SHOCK SUKU BUNGA
+print(round(IRF_rate$irf$dSuku_Bunga, 4))
+# IRF SHOCK KURS
+print(round(IRF_kurs$irf$dKurs, 4))
+
+par(mfrow = c(3, 3), mar = c(3, 4, 3, 1))
+for (x in list(IRF_inflasi, IRF_rate, IRF_kurs)) {
+  imp <- names(x$irf)
+  for (res in colnames(Y)) {
+    m  <- x$irf[[imp]][, res]
+    lo <- x$Lower[[imp]][, res]
+    up <- x$Upper[[imp]][, res]
+    plot(0:12, m, type = "l", lwd = 2, ylim = range(lo, up, 0),
+         main = paste("Shock", imp, "->", res), xlab = "", ylab = "", cex.main = 0.9)
+    lines(0:12, lo, lty = 2, col = "red")
+    lines(0:12, up, lty = 2, col = "red")
+    abline(h = 0, col = "grey40")
+  }
+}
+par(mfrow = c(1, 1))
+```
+
